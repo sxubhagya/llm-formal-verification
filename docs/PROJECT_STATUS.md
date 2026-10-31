@@ -1,6 +1,6 @@
 # Project Status
 
-## Current checkpoint — Update 8
+## Current checkpoint — Update 9
 
 | Area | Status | Evidence / notes |
 |---|---|---|
@@ -21,20 +21,20 @@
 | Non-vacuity cover guard | Implemented | Automatically generates `cover(antecedent)` witness checks |
 | Formal proof execution API | Implemented | `POST /api/formal/verify`; returns PASS/FAIL/UNKNOWN/TIMEOUT/INVALID + VCD traces |
 | RISC benchmark suite | Implemented | 5 core processor blocks: ALU flags, RegFile, Control FSM, Branch PC, Hazard Unit |
-| Frontend workflow integration | Not started (Build 9) | React/Vite workbench placeholder |
+| Frontend workbench studio | Implemented | React/Vite UI connecting design analysis, property generation, assumption review, and formal verification |
+| Failure analysis & refinement | Not started (Build 10) | Counterexample VCD trace waveform extraction and bounded candidate repair |
 
-## Update 8 scope
+## Update 9 scope
 
-- Added `backend/app/models/formal_models.py` defining proof modes (`prove`, `bmc`, `cover`), solver engines (`z3`, `boolector`, `yices`), vacuity statuses, and detailed verification result models.
-- Implemented `CheckerSynthesizer` in `backend/app/services/formal/checker_synthesizer.py` translating candidate properties and SVA implications into procedural Verilog monitors without modifying source RTL.
-- Implemented `SBYRunner` in `backend/app/services/formal/sby_runner.py` with cross-platform WSL/native execution, isolated scratch directories, and robust log parsing (distinguishing base vs. inductive step failure).
-- Implemented `FormalVerificationService` in `backend/app/services/formal/verification_service.py` orchestrating validation -> synthesis -> formal execution.
-- Added `POST /api/formal/verify` endpoint in `backend/app/api/formal.py`.
-- Added 5 new RISC processor RTL benchmarks in `rtl/examples/`: `risc_alu`, `risc_regfile`, `risc_control_fsm`, `risc_branch_pc`, `risc_hazard`.
-- Added 11 automated unit/integration tests in `backend/tests/test_formal_verification.py` (total 39 tests passing).
+- Transformed `frontend/` into an interactive fullstack research workbench.
+- Added quick-load benchmark presets (Counter, Comb ALU, Traffic Light, RISC ALU, RISC Regfile) and custom Verilog code editor.
+- Integrated Design IR v1.2 visualizer displaying port directions, bit-widths, inferred clock/reset, and registers.
+- Connected LLM candidate property generation panel with provider selection (`mock`, `gemini`, `openai`) and custom focus prompts.
+- Added Human-in-the-Loop assumption review controls with reviewer name attribution.
+- Integrated formal verification console configuring proof mode (unbounded $k$-induction `prove`, BMC, `cover`), SMT solver (`z3`, `boolector`, `yices`), depth, and non-vacuity checking.
+- Added high-visibility verdict metrics, per-property witness tags, and synthesized procedural Verilog monitor viewer.
+- Configured Vite development proxy and FastAPI `CORSMiddleware`.
+- Frontend build verified with `npm run build` (built in 1.23s).
+- Full backend suite verified with 39 automated tests passing in 0.067s.
 
-## Verification Boundary
-
-`PASS` indicates that the property was mathematically proven by the underlying formal solver (e.g. Z3 / Boolector via SBY) under the specified assumptions and proof mode ($k$-induction or BMC depth $N$). Non-vacuity is checked via antecedent coverage witnesses. Any counterexample produces a `.vcd` trace for inspection.
-
-See `UpdateDoc1` through `UpdateDoc8` for build handoffs.
+See `UpdateDoc1` through `UpdateDoc9` for build handoffs.
