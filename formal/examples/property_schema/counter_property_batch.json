@@ -1,0 +1,49 @@
+{
+  "batch_id": "counter_manual_fixture_v1",
+  "design_top": "counter",
+  "properties": [
+    {
+      "property_id": "counter_enable_increments",
+      "design_top": "counter",
+      "module": "counter",
+      "name": "Enabled counter increments",
+      "description": "When enabled, the counter advances by one on the next active clock edge.",
+      "category": "safety",
+      "assertion_language": "systemverilog_assertion",
+      "expression": "disable iff (!rst_n) enable |=> count == $past(count) + 1'b1",
+      "signals": [
+        {
+          "name": "count",
+          "role": "state",
+          "expected_width": 8
+        },
+        {
+          "name": "enable",
+          "role": "condition",
+          "expected_width": 1
+        },
+        {
+          "name": "rst_n",
+          "role": "reset",
+          "expected_width": 1
+        }
+      ],
+      "clock": {
+        "signal": "clk",
+        "edge": "posedge"
+      },
+      "reset": {
+        "signal": "rst_n",
+        "polarity": "active_low",
+        "asynchronous": true
+      },
+      "assumptions": [],
+      "preconditions": [],
+      "lifecycle": "generated",
+      "provenance": {
+        "generator": "manual",
+        "generation_notes": "Illustrative schema fixture only; not formally checked."
+      }
+    }
+  ]
+}

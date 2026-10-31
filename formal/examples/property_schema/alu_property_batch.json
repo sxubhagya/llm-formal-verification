@@ -1,0 +1,45 @@
+{
+  "batch_id": "alu_manual_fixture_v1",
+  "design_top": "comb_alu",
+  "properties": [
+    {
+      "property_id": "alu_add_operation",
+      "design_top": "comb_alu",
+      "module": "comb_alu",
+      "name": "ALU addition operation",
+      "description": "When op selects addition, result equals the 8-bit sum of the operands.",
+      "category": "combinational",
+      "assertion_language": "boolean_expression",
+      "expression": "(op == 2'b00) -> result == (a + b)[7:0]",
+      "signals": [
+        {
+          "name": "a",
+          "role": "operand",
+          "expected_width": 8
+        },
+        {
+          "name": "b",
+          "role": "operand",
+          "expected_width": 8
+        },
+        {
+          "name": "op",
+          "role": "selector",
+          "expected_width": 2
+        },
+        {
+          "name": "result",
+          "role": "result",
+          "expected_width": 8
+        }
+      ],
+      "assumptions": [],
+      "preconditions": [],
+      "lifecycle": "generated",
+      "provenance": {
+        "generator": "manual",
+        "generation_notes": "Illustrative schema fixture; expression syntax is not parsed by this endpoint."
+      }
+    }
+  ]
+}

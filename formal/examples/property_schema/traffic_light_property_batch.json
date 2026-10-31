@@ -1,0 +1,40 @@
+{
+  "batch_id": "traffic_light_manual_fixture_v1",
+  "design_top": "traffic_light",
+  "properties": [
+    {
+      "property_id": "traffic_light_one_hot_outputs",
+      "design_top": "traffic_light",
+      "module": "traffic_light",
+      "name": "Exactly one traffic light output is active",
+      "description": "The red, yellow and green outputs are mutually exclusive and collectively one-hot.",
+      "category": "invariant",
+      "assertion_language": "boolean_expression",
+      "expression": "(red + yellow + green) == 1",
+      "signals": [
+        {
+          "name": "red",
+          "role": "output",
+          "expected_width": 1
+        },
+        {
+          "name": "yellow",
+          "role": "output",
+          "expected_width": 1
+        },
+        {
+          "name": "green",
+          "role": "output",
+          "expected_width": 1
+        }
+      ],
+      "assumptions": [],
+      "preconditions": [],
+      "lifecycle": "generated",
+      "provenance": {
+        "generator": "manual",
+        "generation_notes": "Illustrative schema fixture; not formally checked."
+      }
+    }
+  ]
+}
