@@ -1,25 +1,27 @@
 # LLM-Assisted Formal Verification Framework
 
-**Current build:** Update 7 — LLM candidate property generation and design validation.
+**Current build:** Update 8 — Formal verification execution with SymbiYosys (SBY) & RISC benchmark expansion.
 
 ## Objective
 Generate candidate formal properties from Verilog/SystemVerilog RTL with an LLM, then validate and check them using classical formal verification. The LLM proposes; formal tools determine proof outcomes.
 
 ## Current pipeline status
-RTL upload → **Yosys parsing/elaboration → Design IR v1.2** → **LLM Candidate Property Generation & Design Validation** → formal execution (Build 8) → evidence and evaluation.
+RTL upload → **Yosys parsing/elaboration → Design IR v1.2** → **LLM Candidate Property Generation & Validation** → **Procedural Checker Synthesizer → SBY Formal Verification Engine (Build 8)** → evidence and evaluation.
 
-A PASS applies only to the checked property under the configured model, assumptions, and proof mode. It does not prove the entire RTL design correct. Timeout/unknown is never PASS. Do not silently weaken assertions or alter RTL to obtain a pass. FIFO is only an initial smoke-test candidate, not the project scope. 1,000 examples is not a benchmark requirement. Hosted LLM APIs (Gemini, OpenAI) and offline Mock providers are supported.
+A PASS applies only to the checked property under the configured model, assumptions, and proof mode ($k$-induction or BMC). It does not prove the entire RTL design correct. Timeout/unknown is never PASS. Do not silently weaken assertions or alter RTL to obtain a pass. Non-vacuity is checked via antecedent coverage witnesses.
 
 ## Layout
-- `backend/`: FastAPI service, Yosys integration, Design IR v1.2, LLM property generation services, and tests
+- `backend/`: FastAPI service, Yosys integration, Design IR v1.2, LLM property generation services, SBY formal verification runner, and tests
 - `frontend/`: React/Vite workbench placeholder
 - `formal/`: formal tool integration boundary, examples and manual property-schema fixtures
-- `rtl/`: RTL examples (counter, ALU, traffic light FSM, register file, RAM)
-- `docs/`: status, handoff docs (`UpdateDoc1`–`UpdateDoc7`), and IEEE System Design Document (`docs/latex/`)
+- `rtl/examples/`: RTL benchmark library:
+  - Base: `counter`, `comb_alu`, `traffic_light`, `register_file`, `multi_module`
+  - RISC Processor Suite: `risc_alu` (arithmetic/shifts/flags), `risc_regfile` (32x32-bit with x0=0), `risc_control_fsm` (multi-cycle FSM), `risc_branch_pc` (branch/PC unit), `risc_hazard` (forwarding & load-use stall unit)
+- `docs/`: status, handoff docs (`UpdateDoc1`–`UpdateDoc8`), and IEEE System Design Document (`docs/latex/`)
 
 ## Environment
 - **Windows**: Primary development folder `C:\Users\fateh\Desktop\Program Folder`. Use VS Code/PowerShell for app development and Ubuntu WSL2 for formal tools (`wsl -d Ubuntu`). WSL sees the Windows folder at `/mnt/c/Users/fateh/Desktop/Program Folder`. In PowerShell use `npm.cmd` to avoid script execution-policy restrictions.
-- **macOS**: Native Python 3.10+ supported for backend development and mock/live API tests.
+- **macOS**: Native Python 3.10+ supported for backend development, unit tests, and mock/live API tests.
 
 ## Backend Setup
 
@@ -54,20 +56,9 @@ npm run dev
    Uploads `.v` / `.sv` files and synthesizes elaborated `DesignIR` v1.2 with port lists, registers, memory accesses, and FSM candidates.
 2. **`POST /api/properties/validate`**:
    Validates a `PropertyBatch` against a `DesignIR` object for module and signal reference consistency.
-3. **`POST /api/properties/generate` (New in Build 7)**:
-   Extracts structured design context from `DesignIR` and Verilog source, sends prompt to LLM (`mock`, `gemini`, or `openai`), extracts JSON, parses into `CandidateProperty` schema, runs design reference validation, and attaches provenance.
-   - Example request payload:
-   ```json
-   {
-     "design_ir": { ... },
-     "top_module": "counter",
-     "provider": "mock"
-   }
-   ```
-   To use Gemini or OpenAI, set environment variables (`GEMINI_API_KEY` or `OPENAI_API_KEY`) or pass `provider` and `api_key` in the request body.
+3. **`POST /api/properties/generate`**:
+   Extracts structured design context from `DesignIR` and Verilog source, sends prompt to LLM (`mock`, `gemini`, or `openai`), parses JSON into canonical `CandidateProperty` schema, runs design reference validation, and attaches provenance.
+4. **`POST /api/formal/verify` (New in Build 8)**:
+   Synthesizes procedural monitor checker wrappers (`formal_<top>.sv`), runs SymbiYosys (SBY) for unbounded $k$-induction (`prove`) or Bounded Model Checking (`bmc`), parses solver results, evaluates non-vacuity via antecedent cover witnesses, and outputs verdicts (`PASS`, `FAIL`, `UNKNOWN`, `TIMEOUT`, `INVALID`) alongside counterexample `.vcd` trace paths.
 
-## Important Validation Boundary
-
-`design_valid: true` indicates that referenced module/signal names and declared widths match the supplied `DesignIR`. It does **not** prove that the property is syntactically valid SVA, non-vacuous, or mathematically proven. All candidate properties maintain `verification_status: "not_run"` until formal backends execute them in Build 8.
-
-See `docs/UpdateDoc7.md` and `docs/PROJECT_STATUS.md` for full implementation details.
+See `docs/UpdateDoc8.md` and `docs/PROJECT_STATUS.md` for full implementation details.
