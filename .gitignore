@@ -16,6 +16,7 @@ formal/**/engine_*/
 *.smt2
 *.log
 *.sqlite
+*.zip
 .vscode/
 .idea/
 .DS_Store

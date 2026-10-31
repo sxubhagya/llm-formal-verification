@@ -1,36 +1,38 @@
 # Project Status
 
-## Current checkpoint — Update 6
+## Current checkpoint — Update 7
 
 | Area | Status | Evidence / notes |
 |---|---|---|
-| Repository skeleton and environments | Verified | User previously verified local startup and tests |
+| Repository skeleton and environments | Verified | User previously verified local startup; macOS Python 3.10 verified |
 | Windows-to-WSL Yosys path | Verified | Live counter/ALU/FSM/register-file/multi-module analysis |
 | Counter and ALU RTL analysis | Verified | API returned ANALYZED |
 | FSM/register-file/multi-module analysis | Verified | User supplied successful Build 5 API outputs |
-| Design IR v1.1 summaries/connectivity | Verified | Build 5 tests and live uploads |
-| Memory access extraction | Implemented; local test included | Clock-enabled memory write ports contribute clock candidates |
-| Enum-based FSM candidates | Implemented; local test included | Candidate metadata only; no transition reconstruction |
-| Candidate-property schema | Implemented | Pydantic models and validation lifecycle; 17 backend tests pass |
-| Design-reference validation API | Implemented | `POST /api/properties/validate`; signal names and widths only |
-| Assumption review controls | Implemented | Accepted/rejected assumptions require reviewer identity |
-| LLM property generation | Not started | |
-| SVA parsing/elaboration | Not started | |
-| Formal proof execution through app | Not started | |
-| Frontend workflow integration | Not started | |
+| Design IR v1.2 summaries/connectivity | Verified | Memory access records and enum-derived FSM candidate extraction |
+| Candidate-property schema | Implemented | Pydantic models, assumptions guard, provenance |
+| Design-reference validation API | Implemented | `POST /api/properties/validate`; signal names and widths |
+| Provider abstraction layer | Implemented | `LLMProvider` interface; Gemini, OpenAI, and deterministic Mock |
+| Design context preparation | Implemented | Extracts ports, registers, clocks, resets, memories, FSMs, source snippets |
+| Prompt construction | Implemented | Untrusted generator role, zero proof claims, explicit assumption rationale |
+| Structured property output parsing | Implemented | Markdown fence stripping, schema validation, assumption guard |
+| LLM candidate generation API | Implemented | `POST /api/properties/generate`; 28 backend tests pass |
+| Formal proof execution through app | Not started (Build 8) | Formal runner / SBY integration planned for Build 8 |
+| SVA parsing/elaboration | In design | Clocked procedural monitor checker synthesizer planned for Build 8 |
+| Frontend workflow integration | Not started (Build 9) | React/Vite workbench placeholder |
 
-## Update 6 scope
+## Update 7 scope
 
-- Added IR v1.2 memory access records and clocked-memory clock candidates.
-- Added conservative enum-derived FSM candidates; this does not reconstruct transitions.
-- Added provider-independent candidate-property schema and lifecycle/status enums.
-- Added assumption review metadata and reviewer requirement for accepted/rejected assumptions.
-- Added `POST /api/properties/validate` for design-top, module, signal-name and width checks. Clock/reset review warnings are non-fatal.
-- Added manual property fixtures for counter, ALU and traffic-light examples.
-- Corrected README and project status documentation.
+- Added provider-independent LLM service (`LLMProvider`, `LLMResponse`, factory).
+- Implemented `GeminiProvider` (REST via httpx with token/cost tracking and error mapping), `OpenAIProvider`, and `MockProvider`.
+- Implemented `build_design_context()` extracting elaborated ports, DFF registers, clock/reset inference, memory instances, FSM candidates, and source snippets.
+- Implemented `build_generation_prompts()` enforcing untrusted role, zero proof claims, and mandatory assumption rationale.
+- Implemented `PropertyGenerationService` orchestrating context -> prompt -> provider -> JSON extraction -> Pydantic parsing -> design reference validation.
+- Added `POST /api/properties/generate` endpoint returning generated properties and automatic design validation results.
+- Added 11 new automated unit tests in `backend/tests/test_llm_pipeline.py` (total 28 automated tests passing).
+- Added IEEE Std 1016-2009 / ISO/IEC/IEEE 29148 system design document in `docs/latex/`.
 
 ## Important validation boundary
 
-`design_valid` means referenced module/signal names and declared widths match the supplied DesignIR. It does not mean the assertion expression is syntactically valid, semantically correct, non-vacuous, or proven. `verification_status` remains `not_run` until a formal backend executes the property.
+`design_valid` means referenced module/signal names and declared widths match the supplied DesignIR. It does not mean the assertion expression is syntactically valid, semantically correct, non-vacuous, or proven. `verification_status` strictly remains `not_run` until a formal backend executes the property in Build 8.
 
-See `UpdateDoc1` through `UpdateDoc6` for build handoffs.
+See `UpdateDoc1` through `UpdateDoc7` for build handoffs.

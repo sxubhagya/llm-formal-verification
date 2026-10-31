@@ -91,6 +91,9 @@ class PropertyProvenance(BaseModel):
     prompt_version: str | None = None
     source_design_hash: str | None = None
     generation_notes: str | None = None
+    timestamp: str | None = None
+    tokens_used: int | None = None
+
 
 class CandidateProperty(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -151,3 +154,24 @@ class DesignPropertyValidationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     design: Any
     batch: PropertyBatch
+
+
+class PropertyGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    design: Any
+    target_module: str | None = None
+    max_properties: int = Field(default=5, ge=1, le=20)
+    focus_areas: list[str] | None = None
+    source_code: str | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
+class PropertyGenerationResponse(BaseModel):
+    batch: PropertyBatch
+    validation: PropertyValidationBatchResult
+    provenance: PropertyProvenance
+    raw_response: str | None = None
+    usage: dict[str, Any] | None = None
+    warnings: list[str] = Field(default_factory=list)
+
