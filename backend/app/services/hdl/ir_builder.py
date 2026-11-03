@@ -18,6 +18,22 @@ def _category(cell_type: str, module_names: set[str]) -> str:
     if cell_type.startswith("$"): return "internal"
     return "other"
 
+
+
+def _json_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    raw = str(value).strip().lower().replace("_", "")
+    if raw in {"", "0", "false", "no"}:
+        return False
+    if raw in {"1", "true", "yes"}:
+        return True
+    if raw and set(raw) <= {"0", "1"}:
+        return int(raw, 2) != 0
+    return False
+
 def build_design_ir(raw: dict[str, Any], source_files: list[str], top_module: str) -> DesignIR:
     raw_modules = raw.get("modules", {})
     if top_module not in raw_modules:
@@ -26,8 +42,8 @@ def build_design_ir(raw: dict[str, Any], source_files: list[str], top_module: st
     modules: list[ModuleIR] = []
     warnings: list[str] = []
     for module_name, module in raw_modules.items():
-        ports = [PortIR(name=n, direction=p.get("direction", "unknown"), bit_width=len(p.get("bits", [])), bits=p.get("bits", [])) for n,p in module.get("ports", {}).items()]
-        nets = [NetIR(name=n, bit_width=len(v.get("bits", [])), bits=v.get("bits", []), attributes=v.get("attributes", {})) for n,v in module.get("netnames", {}).items()]
+        ports = [PortIR(name=n, direction=p.get("direction", "unknown"), bit_width=len(p.get("bits", [])), bits=p.get("bits", []), is_signed=_json_flag(p.get("signed", False)), offset=int(p.get("offset", 0)), upto=_json_flag(p.get("upto", False))) for n,p in module.get("ports", {}).items()]
+        nets = [NetIR(name=n, bit_width=len(v.get("bits", [])), bits=v.get("bits", []), attributes=v.get("attributes", {}), is_signed=_json_flag(v.get("signed", False)), offset=int(v.get("offset", 0)), upto=_json_flag(v.get("upto", False))) for n,v in module.get("netnames", {}).items()]
         cells: list[CellIR] = []
         registers: list[RegisterIR] = []
         memory_accesses: list[MemoryAccessIR] = []
@@ -92,6 +108,26 @@ def build_design_ir(raw: dict[str, Any], source_files: list[str], top_module: st
             if enum_values:
                 fsm_candidates.append(FSMCandidateIR(
                     state_net=net.name, state_bits=net.bits, encoded_states=enum_values))
+        # Resolve structural clock/reset bit-vectors back to top-level port names.
+        # Keep bit-level evidence while exposing names for the UI and reports.
+        def resolve_candidate_names(candidates: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+            resolved: list[dict[str, Any]] = []
+            for candidate in candidates.values():
+                item = dict(candidate)
+                candidate_bits = [str(bit) for bit in item.get("bits", [])]
+                matching_ports = [
+                    port.name for port in ports
+                    if port.direction == "input"
+                    and [str(bit) for bit in port.bits] == candidate_bits
+                ]
+                item["name"] = matching_ports[0] if matching_ports else None
+                item["signal"] = matching_ports[0] if matching_ports else None
+                resolved.append(item)
+            return resolved
+
+        named_clock_candidates = resolve_candidate_names(clock_map)
+        named_reset_candidates = resolve_candidate_names(reset_map)
+
         counts=Counter(c.cell_type for c in cells)
         summary=ModuleSummaryIR(
             port_count=len(ports),
@@ -105,8 +141,8 @@ def build_design_ir(raw: dict[str, Any], source_files: list[str], top_module: st
             cell_type_counts=dict(sorted(counts.items())))
         modules.append(ModuleIR(name=module_name, attributes=module.get("attributes",{}), ports=ports, nets=nets,
             cells=cells, registers=registers, memory_accesses=memory_accesses,
-            fsm_candidates=fsm_candidates, clock_candidates=list(clock_map.values()),
-            reset_candidates=list(reset_map.values()), summary=summary))
+            fsm_candidates=fsm_candidates, clock_candidates=named_clock_candidates,
+            reset_candidates=named_reset_candidates, summary=summary))
     if len(raw_modules)>1:
         warnings.append("The IR includes all modules emitted by Yosys. Module-instance cells are identified by matching cell types to module names; confirm hierarchy against the elaboration log.")
     warnings.append("Cell driven_by/drives relationships are inferred from bit-level producer/consumer connections. They are structural approximations and do not establish behavioural intent.")
@@ -119,5 +155,7 @@ def build_design_ir(raw: dict[str, Any], source_files: list[str], top_module: st
             "Procedural intent and source-level constructs may be transformed during Yosys elaboration/optimization.",
             "Clock domains, reset semantics, FSM meaning and signal roles may require additional analysis and designer confirmation.",
             "Cell connectivity is a structural approximation; it does not by itself prove functional dependencies or protocol semantics.",
-            "Unsupported or non-synthesizable language constructs may be rejected by Yosys."
+            "Unsupported or non-synthesizable language constructs may be rejected by Yosys.",
+            "Internal nets are represented in DesignIR but are not currently bindable in formal checker wrappers; candidate assertions on them are rejected.",
+            "Signedness and packed-vector index metadata are retained when present in Yosys JSON; signed expression semantics remain unsupported by the checker."
         ])

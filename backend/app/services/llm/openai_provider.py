@@ -67,6 +67,11 @@ class OpenAIProvider(LLMProvider):
 
         choice = choices[0]
         text = choice.get("message", {}).get("content", "")
+        finish_reason = choice.get("finish_reason")
+        if not text.strip():
+            raise ValueError("OpenAI returned an empty response.")
+        if finish_reason not in (None, "stop"):
+            raise ValueError(f"OpenAI response was not completed normally (finish_reason={finish_reason}).")
 
         usage_raw = data.get("usage", {})
         usage = {
@@ -79,5 +84,5 @@ class OpenAIProvider(LLMProvider):
             content=text,
             model_name=self.model_name,
             usage=usage,
-            raw={"finish_reason": choice.get("finish_reason")}
+            raw={"finish_reason": finish_reason}
         )

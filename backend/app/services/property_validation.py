@@ -21,34 +21,71 @@ def validate_property_batch(design: DesignIR, batch: PropertyBatch) -> PropertyV
             issues.append(PropertyValidationIssue(property_id=prop.property_id, code="UNKNOWN_MODULE",
                 message=f"Module '{prop.module}' is not present in the supplied DesignIR."))
         else:
-            signal_map = {p.name: p.bit_width for p in module.ports}
-            signal_map.update({n.name: n.bit_width for n in module.nets})
+            # Internal nets are accepted only when the elaborated DesignIR
+            # contains an exact named net in the selected module. The checker
+            # synthesizer creates an explicit hierarchical probe alias
+            # (dut.<net>) and validates width/signedness before use.
+            port_map = {p.name: p for p in module.ports}
+            net_map = {n.name: n for n in module.nets if n.name not in port_map}
             for signal in prop.signals:
-                if signal.name not in signal_map:
+                port = port_map.get(signal.name)
+                net = net_map.get(signal.name)
+                actual = port or net
+                if actual is None:
                     issues.append(PropertyValidationIssue(property_id=prop.property_id, code="UNKNOWN_SIGNAL",
-                        message=f"Signal '{signal.name}' was not found in module '{prop.module}'."))
-                elif signal.expected_width is not None and signal.expected_width != signal_map[signal.name]:
+                        message=f"Signal '{signal.name}' was not found as a port or named net in module '{prop.module}'."))
+                    continue
+                if port is not None and port.direction not in {"input", "output"}:
+                    issues.append(PropertyValidationIssue(property_id=prop.property_id, code="UNSUPPORTED_PORT_DIRECTION",
+                        message=f"Port '{signal.name}' has direction '{port.direction}', which the formal wrapper does not support."))
+                if actual.is_signed:
+                    issues.append(PropertyValidationIssue(property_id=prop.property_id, code="SIGNED_SIGNAL_UNSUPPORTED",
+                        message=f"Signal '{signal.name}' is signed. Signed expression semantics are not yet supported; this property is rejected rather than coerced to unsigned."))
+                if signal.expected_width is not None and signal.expected_width != actual.bit_width:
                     issues.append(PropertyValidationIssue(property_id=prop.property_id, code="SIGNAL_WIDTH_MISMATCH",
-                        message=f"Signal '{signal.name}' has width {signal_map[signal.name]}, not expected width {signal.expected_width}."))
+                        message=f"Signal '{signal.name}' has width {actual.bit_width}, not expected width {signal.expected_width}."))
             if prop.clock:
-                if prop.clock.signal not in signal_map:
-                    issues.append(PropertyValidationIssue(property_id=prop.property_id, code="UNKNOWN_CLOCK",
-                        message=f"Clock signal '{prop.clock.signal}' was not found in module '{prop.module}'."))
+                clock_port = port_map.get(prop.clock.signal)
+                if clock_port is None:
+                    issues.append(PropertyValidationIssue(property_id=prop.property_id, code="UNKNOWN_OR_INTERNAL_CLOCK",
+                        message=f"Clock '{prop.clock.signal}' must be a top-level input port of '{prop.module}'."))
+                elif clock_port.direction != "input" or clock_port.bit_width != 1:
+                    issues.append(PropertyValidationIssue(property_id=prop.property_id, code="INVALID_CLOCK_PORT",
+                        message=f"Clock '{prop.clock.signal}' must be a 1-bit input port."))
                 else:
-                    clock_port = next((p for p in module.ports if p.name == prop.clock.signal), None)
-                    known_clock_bits = {str(bit) for candidate in module.clock_candidates for bit in candidate.get("bits", [])}
-                    if clock_port and not any(str(bit) in known_clock_bits for bit in clock_port.bits):
+                    has_matching_clock = any(
+                        (candidate.get("signal") or candidate.get("name")) == prop.clock.signal
+                        and [str(bit) for bit in candidate.get("bits", [])] == [str(bit) for bit in clock_port.bits]
+                        for candidate in module.clock_candidates
+                    )
+                    if not has_matching_clock:
+                        has_sequential_state = bool(module.registers or any(access.clocked for access in module.memory_accesses))
                         issues.append(PropertyValidationIssue(property_id=prop.property_id, code="CLOCK_NOT_STRUCTURALLY_CONFIRMED",
                             message=f"'{prop.clock.signal}' exists, but no sequential or clock-enabled memory cell currently identifies it as a clock candidate.",
-                            severity="warning"))
+                            severity="error" if has_sequential_state else "warning"))
             if prop.reset:
-                if prop.reset.signal not in signal_map:
-                    issues.append(PropertyValidationIssue(property_id=prop.property_id, code="UNKNOWN_RESET",
-                        message=f"Reset signal '{prop.reset.signal}' was not found in module '{prop.module}'."))
-                elif not any(p.name == prop.reset.signal for p in module.ports):
-                    issues.append(PropertyValidationIssue(property_id=prop.property_id, code="RESET_ROLE_REVIEW",
-                        message=f"'{prop.reset.signal}' exists but is not a top-level module port; confirm its reset role.",
-                        severity="warning"))
+                reset_port = port_map.get(prop.reset.signal)
+                if reset_port is None or reset_port.direction != "input":
+                    issues.append(PropertyValidationIssue(property_id=prop.property_id, code="INVALID_RESET_PORT",
+                        message=f"Reset '{prop.reset.signal}' must be a top-level input port."))
+                elif reset_port.bit_width != 1:
+                    issues.append(PropertyValidationIssue(property_id=prop.property_id, code="INVALID_RESET_WIDTH",
+                        message=f"Reset '{prop.reset.signal}' must be 1 bit."))
+                else:
+                    reset_bits = [str(bit) for bit in reset_port.bits]
+                    reset_candidates = [
+                        candidate for candidate in module.reset_candidates
+                        if [str(bit) for bit in candidate.get("bits", [])] == reset_bits
+                        and candidate.get("kind") in {"asynchronous", "synchronous"}
+                    ]
+                    if not reset_candidates:
+                        issues.append(PropertyValidationIssue(property_id=prop.property_id, code="RESET_NOT_STRUCTURALLY_CONFIRMED",
+                            message=f"'{prop.reset.signal}' is not identified on a supported sequential reset pin."))
+                    elif prop.reset.asynchronous is not None:
+                        kinds = {candidate.get("kind") for candidate in reset_candidates}
+                        if len(kinds) != 1 or (next(iter(kinds)) == "asynchronous") != prop.reset.asynchronous:
+                            issues.append(PropertyValidationIssue(property_id=prop.property_id, code="RESET_TIMING_MISMATCH",
+                                message=f"Reset timing metadata for '{prop.reset.signal}' conflicts with the elaborated sequential-cell reset kind."))
         errors = [issue for issue in issues if issue.severity == "error"]
         lifecycle = PropertyLifecycle.DESIGN_VALID if not errors else PropertyLifecycle.REJECTED
         results.append(PropertyValidationResult(

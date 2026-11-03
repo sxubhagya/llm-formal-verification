@@ -30,18 +30,18 @@ def get_llm_provider(
 ) -> LLMProvider:
     """Factory to retrieve a configured LLM provider instance."""
     name = (provider_name or settings.llm_provider or "gemini").lower().strip()
-    key = api_key or settings.llm_api_key
-
     if name == "mock":
         from backend.app.services.llm.mock_provider import MockProvider
         return MockProvider(model_name=model or "mock-model")
 
     if name in {"gemini", "google"}:
         from backend.app.services.llm.gemini_provider import GeminiProvider
+        key = api_key or settings.gemini_api_key or settings.generic_llm_api_key
         return GeminiProvider(api_key=key, model_name=model or settings.llm_model)
 
     if name == "openai":
         from backend.app.services.llm.openai_provider import OpenAIProvider
+        key = api_key or settings.openai_api_key or settings.generic_llm_api_key
         return OpenAIProvider(api_key=key, model_name=model or settings.llm_model)
 
     raise ValueError(f"Unsupported LLM provider '{name}'. Supported: 'gemini', 'openai', 'mock'.")

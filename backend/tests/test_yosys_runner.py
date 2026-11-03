@@ -16,27 +16,25 @@ class TestYosysRunner(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 YosysRunner(mode="native").run([Path(tmp) / "missing.v"], "top", Path(tmp) / "out.json")
 
-    @patch("backend.app.services.hdl.yosys_runner.subprocess.run")
+    @patch("backend.app.services.hdl.yosys_runner.subprocess.Popen")
     @patch("backend.app.services.hdl.yosys_runner.shutil.which", return_value="/usr/bin/yosys")
-    def test_native_runner_writes_script_and_reads_output(self, _which, run_mock):
+    def test_native_runner_writes_script_and_reads_output(self, _which, popen_mock):
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "top.v"
             src.write_text("module top; endmodule")
             out = Path(tmp) / "out.json"
 
-            def fake_run(*args, **kwargs):
+            process = MagicMock()
+            process.returncode = 0
+            def fake_communicate(timeout=None):
                 out.write_text('{"modules":{"top":{}}}')
-                result = MagicMock()
-                result.returncode = 0
-                result.stdout = "Yosys done"
-                result.stderr = ""
-                return result
-
-            run_mock.side_effect = fake_run
+                return ("Yosys done", "")
+            process.communicate.side_effect = fake_communicate
+            popen_mock.return_value = process
             log = YosysRunner(mode="native").run([src], "top", out)
             self.assertIn("Yosys done", log)
             self.assertTrue(out.exists())
-            self.assertEqual(run_mock.call_args.args[0][0], "yosys")
+            self.assertEqual(popen_mock.call_args.args[0][0], "yosys")
 
     @patch("backend.app.services.hdl.yosys_runner.subprocess.run")
     def test_wsl_path_uses_forward_slashes_for_windows_paths(self, run_mock):

@@ -36,7 +36,8 @@ def generate_properties(request: PropertyGenerationRequest):
             target_module=request.target_module,
             max_properties=request.max_properties,
             focus_areas=request.focus_areas,
-            source_code=request.source_code
+            source_code=request.source_code,
+            specification=request.specification
         )
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc

@@ -58,14 +58,46 @@ class YosysRunner:
                 cmd = ["wsl.exe", "-d", self.distro, "--", "yosys", "-s", script_path]
             else:
                 cmd = ["yosys", "-s", str(script.resolve())]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_seconds)
+            popen_kwargs = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "text": True,
+            }
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            else:
+                popen_kwargs["start_new_session"] = True
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+            try:
+                stdout, stderr = proc.communicate(timeout=self.timeout_seconds)
+            except subprocess.TimeoutExpired as exc:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                        capture_output=True, text=True, timeout=10
+                    )
+                else:
+                    import signal
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                partial_out, partial_err = proc.communicate()
+                raise YosysExecutionError(
+                    f"Yosys exceeded the {self.timeout_seconds}-second timeout.",
+                    output=((partial_out or "") + "\\n" + (partial_err or ""))[-12000:]
+                ) from exc
+            returncode = proc.returncode
+            output = (stdout or "") + (stderr or "")
         except subprocess.TimeoutExpired as exc:
-            raise YosysExecutionError(f"Yosys exceeded the {self.timeout_seconds}-second timeout.", output=(exc.stdout or "")) from exc
+            partial = exc.stdout or ""
+            if isinstance(partial, bytes):
+                partial = partial.decode("utf-8", errors="replace")
+            raise YosysExecutionError(f"Yosys exceeded the {self.timeout_seconds}-second timeout.", output=partial) from exc
         finally:
             script.unlink(missing_ok=True)
-        output = (result.stdout or "") + (result.stderr or "")
-        if result.returncode != 0:
-            raise YosysExecutionError("Yosys failed to parse or elaborate the supplied RTL.", returncode=result.returncode, output=output[-12000:])
+        if returncode != 0:
+            raise YosysExecutionError("Yosys failed to parse or elaborate the supplied RTL.", returncode=returncode, output=output[-12000:])
         if not output_json.is_file():
-            raise YosysExecutionError("Yosys completed without producing the expected JSON output.", returncode=result.returncode, output=output[-12000:])
+            raise YosysExecutionError("Yosys completed without producing the expected JSON output.", returncode=returncode, output=output[-12000:])
         return output

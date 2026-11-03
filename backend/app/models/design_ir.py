@@ -7,12 +7,18 @@ class PortIR(BaseModel):
     direction: str
     bit_width: int
     bits: list[int | str] = Field(default_factory=list)
+    is_signed: bool = False
+    offset: int = 0
+    upto: bool = False
 
 class NetIR(BaseModel):
     name: str
     bit_width: int
     bits: list[int | str] = Field(default_factory=list)
     attributes: dict[str, Any] = Field(default_factory=dict)
+    is_signed: bool = False
+    offset: int = 0
+    upto: bool = False
 
 class CellIR(BaseModel):
     name: str
@@ -79,7 +85,7 @@ class ModuleIR(BaseModel):
     summary: ModuleSummaryIR = Field(default_factory=ModuleSummaryIR)
 
 class DesignIR(BaseModel):
-    ir_version: str = "1.2"
+    ir_version: str = "1.3"
     frontend: str = "yosys"
     top_module: str
     source_files: list[str]

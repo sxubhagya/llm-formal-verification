@@ -90,6 +90,7 @@ class PropertyProvenance(BaseModel):
     model_name: str | None = None
     prompt_version: str | None = None
     source_design_hash: str | None = None
+    source_specification_hash: str | None = None
     generation_notes: str | None = None
     timestamp: str | None = None
     tokens_used: int | None = None
@@ -110,6 +111,7 @@ class CandidateProperty(BaseModel):
     reset: ResetContext | None = None
     assumptions: list[PropertyAssumption] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
+    requirement_ids: list[str] = Field(default_factory=list, description="Independent behavioural requirements implemented by this property")
     lifecycle: PropertyLifecycle = PropertyLifecycle.GENERATED
     provenance: PropertyProvenance = Field(default_factory=PropertyProvenance)
 
@@ -127,7 +129,14 @@ class PropertyBatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     batch_id: str
     design_top: str
-    properties: list[CandidateProperty] = Field(min_length=1)
+    properties: list[CandidateProperty] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def unique_property_ids(self):
+        ids = [prop.property_id for prop in self.properties]
+        if len(ids) != len(set(ids)):
+            raise ValueError("property_id values must be unique within a batch")
+        return self
 
 class PropertyValidationIssue(BaseModel):
     property_id: str
@@ -142,7 +151,7 @@ class PropertyValidationResult(BaseModel):
     lifecycle: PropertyLifecycle
     issues: list[PropertyValidationIssue] = Field(default_factory=list)
     verification_status: VerificationStatus = VerificationStatus.NOT_RUN
-    note: str = "Design validation checks referenced signal names and widths only; they do not parse or prove the assertion expression."
+    note: str = "Design validation checks supported top-level port bindings, directions, widths, signedness and clock/reset roles. It does not parse or prove the assertion expression."
 
 class PropertyValidationBatchResult(BaseModel):
     design_top: str
@@ -160,11 +169,12 @@ class PropertyGenerationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     design: Any
     target_module: str | None = None
-    max_properties: int = Field(default=5, ge=1, le=20)
+    max_properties: int = Field(default=12, ge=1, le=20)
     focus_areas: list[str] | None = None
     source_code: str | None = None
     provider: str | None = None
     model: str | None = None
+    specification: dict[str, Any]
 
 
 class PropertyGenerationResponse(BaseModel):
@@ -174,4 +184,5 @@ class PropertyGenerationResponse(BaseModel):
     raw_response: str | None = None
     usage: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
+    generation_audit: dict[str, Any] | None = None
 

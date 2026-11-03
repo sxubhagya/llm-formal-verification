@@ -29,9 +29,10 @@ Request:
 The service checks:
 - Batch and property top-module consistency
 - Existence of the target module
-- Existence of each referenced signal in that module
-- Optional expected signal widths
-- Existence of declared clock and reset signals
+- Existence of each referenced top-level port
+- Optional expected port widths
+- Top-level input role and width for clock/reset signals
+- Unsupported internal-net references, signed ports and `inout` ports are rejected
 
 It can issue warnings when a declared clock is not structurally recognised or reset role needs review.
 
@@ -45,6 +46,12 @@ It can issue warnings when a declared clock is not structurally recognised or re
 - It never changes RTL or weakens a property.
 
 A `design_valid` result only means the structural references passed these checks. The verification status remains `not_run`.
+
+## Build 14 checker binding boundary
+
+The formal wrapper currently wires only top-level input/output ports. Internal DUT nets are not safely addressable through the current wrapper. They are intentionally rejected by both validation and checker synthesis. This avoids a critical failure mode where a same-named but undriven wrapper-local wire is asserted instead of the real DUT state. Do not remove this restriction until a Yosys-backed instrumentation mechanism exposes internal signals with verified identity, width, signedness and hierarchy.
+
+Signed ports are also rejected until signed arithmetic and comparison semantics are preserved through the checker. `inout` ports are unsupported.
 
 ## Fixtures
 

@@ -1,40 +1,60 @@
-# Project Status
+# Project Status — Build 15.3
 
-## Current checkpoint — Update 9
+**Current package:** Build 15.3, correction to the Windows-to-WSL Yosys JSON conversion path, 2 November 2026.
 
-| Area | Status | Evidence / notes |
+Build 15.1 introduced explicit Yosys JSON netlist instrumentation for internal named-net probes. Build 15.2 added detailed conversion diagnostics. The user's Build 15.2 FIFO run exposed the exact defect: the conversion Yosys script was executed inside WSL but embedded Windows paths (`C:/Users/...`) in `read_json` and `write_verilog` commands. Yosys therefore could not open the JSON file. Build 15.3 translates both paths through `wslpath` before writing the conversion script.
+
+| Area | Status | Evidence / qualification |
 |---|---|---|
-| Repository skeleton and environments | Verified | Windows + Ubuntu WSL2 and macOS Python environments operational |
-| Windows-to-WSL Yosys path | Verified | Live counter/ALU/FSM/register-file/multi-module analysis |
-| Counter and ALU RTL analysis | Verified | API returned ANALYZED |
-| FSM/register-file/multi-module analysis | Verified | User supplied successful Build 5 API outputs |
-| Design IR v1.2 summaries/connectivity | Verified | Memory access records and enum-derived FSM candidate extraction |
-| Candidate-property schema | Implemented | Pydantic models, assumptions guard, provenance |
-| Design-reference validation API | Implemented | `POST /api/properties/validate`; signal names and widths |
-| Provider abstraction layer | Implemented | `LLMProvider` interface; Gemini, OpenAI, and deterministic Mock |
-| Design context preparation | Implemented | Extracts ports, registers, clocks, resets, memories, FSMs, source snippets |
-| Prompt construction | Implemented | Untrusted generator role, zero proof claims, explicit assumption rationale |
-| Structured property output parsing | Implemented | Markdown fence stripping, schema validation, assumption guard |
-| LLM candidate generation API | Implemented | `POST /api/properties/generate`; 28 backend tests pass |
-| Procedural checker synthesizer | Implemented | Synthesizes `formal_<top>` wrapper with `$past()`, `assert`, `assume`, and `cover` |
-| SymbiYosys (SBY) execution runner | Implemented | Cross-platform (native & WSL) SBY runner for BMC and unbounded $k$-induction |
-| Non-vacuity cover guard | Implemented | Automatically generates `cover(antecedent)` witness checks |
-| Formal proof execution API | Implemented | `POST /api/formal/verify`; returns PASS/FAIL/UNKNOWN/TIMEOUT/INVALID + VCD traces |
-| RISC benchmark suite | Implemented | 5 core processor blocks: ALU flags, RegFile, Control FSM, Branch PC, Hazard Unit |
-| Frontend workbench studio | Implemented | React/Vite UI connecting design analysis, property generation, assumption review, and formal verification |
-| Failure analysis & refinement | Not started (Build 10) | Counterexample VCD trace waveform extraction and bounded candidate repair |
+| Independent behavioural specification | Retained | Approval remains bound to exact specification content hash |
+| Internal named-net observation | Implemented | Yosys JSON bit IDs are exposed through explicit top-level output ports |
+| Windows-to-WSL conversion paths | Fixed in code | JSON input and Verilog output paths embedded in `convert.ys` are translated to WSL paths |
+| Conversion diagnostics | Retained | Stage, command, working directory, script, return code, stdout and stderr remain available |
+| WSL path regression test | Added | Confirms `read_json` and `write_verilog` use `/mnt/...` paths, not Windows drive paths |
+| Internal memory-array observation | Not implemented | Memory read/write port and array-state instrumentation remain a separate task |
+| Initial reset environment | Retained | Optional reviewer + rationale required; active reset assumed on first clock edge only; disabled by default |
+| Arbitrary initial state warning | Retained | Sequential verification without a reset contract warns that initial state is unconstrained |
+| Property count | LLM-selected | Backend ceiling is a safety limit, not a target |
+| VCD trace persistence | Retained | Existing run-store behaviour |
+| Frontend | Updated | Build label 15.3 |
+| API | Updated | FastAPI version 0.9.3 |
 
-## Update 9 scope
+## Root cause confirmed from user's Build 15.2 diagnostic
 
-- Transformed `frontend/` into an interactive fullstack research workbench.
-- Added quick-load benchmark presets (Counter, Comb ALU, Traffic Light, RISC ALU, RISC Regfile) and custom Verilog code editor.
-- Integrated Design IR v1.2 visualizer displaying port directions, bit-widths, inferred clock/reset, and registers.
-- Connected LLM candidate property generation panel with provider selection (`mock`, `gemini`, `openai`) and custom focus prompts.
-- Added Human-in-the-Loop assumption review controls with reviewer name attribution.
-- Integrated formal verification console configuring proof mode (unbounded $k$-induction `prove`, BMC, `cover`), SMT solver (`z3`, `boolector`, `yices`), depth, and non-vacuity checking.
-- Added high-visibility verdict metrics, per-property witness tags, and synthesized procedural Verilog monitor viewer.
-- Configured Vite development proxy and FastAPI `CORSMiddleware`.
-- Frontend build verified with `npm run build` (built in 1.23s).
-- Full backend suite verified with 39 automated tests passing in 0.067s.
+The failing script contained:
 
-See `UpdateDoc1` through `UpdateDoc9` for build handoffs.
+```text
+read_json "C:/Users/fateh/AppData/Local/Temp/.../instrumented.json"
+hierarchy -check -top sync_fifo
+write_verilog -noattr "C:/Users/fateh/AppData/Local/Temp/.../instrumented_design.v"
+```
+
+Yosys 0.33 ran inside WSL and returned:
+
+```text
+ERROR: Can't open input file `C:/Users/.../instrumented.json' for reading: No such file or directory
+```
+
+The conversion stage now calls the existing `YosysRunner._wsl_path()` for both files and writes the resulting Linux paths into the Yosys script. Native execution continues to use resolved host paths.
+
+## Local validation in the assistant environment
+
+- Backend tests: **114 passed, 4 parameterized subtests passed**.
+- Focused Yosys runner/instrumenter tests: **8 passed**.
+- Python compilation: completed for backend source tree.
+- Real Windows + WSL Yosys execution: not available in the assistant environment; must be confirmed by the user's WSL smoke test and FIFO run.
+- Full frontend production build: not independently completed in this correction.
+
+## Required user validation
+
+1. Install Build 15.3 while preserving `.env`, `.venv`, `.venv-wsl`, and `frontend/node_modules`.
+2. Run `python backend/scripts/run_internal_probe_smoke.py` in Ubuntu WSL. This confirms native-in-WSL register probing remains intact.
+3. Run the same FIFO verification using the existing 12 properties, unchanged RTL, and unchanged approved specification. Do not regenerate properties.
+4. If conversion succeeds, inspect individual property statuses. This only validates the register/control properties; it does not prove FIFO memory ordering or storage.
+
+## Known limitations
+
+- Internal probes are limited to named nets in the selected top module's Yosys JSON `netnames` with concrete bit IDs.
+- Memory array contents are not directly probed. FIFO data storage, oldest-entry ordering and memory preservation need dedicated memory instrumentation or an equivalent formal reference model.
+- A successful conversion does not guarantee every candidate property is semantically adequate. Property coverage and vacuity still require separate review.
+- This release is not yet considered FIFO-validated.

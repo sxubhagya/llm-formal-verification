@@ -1,23 +1,97 @@
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.venv/
-venv/
-node_modules/
-dist/
-.vite/
+
+# ==========================================
+# ENVIRONMENT VARIABLES & SECRETS
+# ==========================================
 .env
 .env.*
 !.env.example
-formal/work/
-formal/**/engine_*/
+
+# ==========================================
+# PYTHON
+# ==========================================
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# ==========================================
+# NODE.JS / FRONTEND
+# ==========================================
+node_modules/
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# ==========================================
+# FORMAL VERIFICATION OUTPUTS
+formal/runs/
+# ==========================================
 *.vcd
+*.fst
 *.yw
+*.sby/
 *.smt2
+*.il
+*.jsonl
+formal_output/
+formal_outputs/
+verification_output/
+verification_outputs/
+sby_work/
+work_*/
+tmp/
+
+# ==========================================
+# LOGS & TEMPORARY FILES
+# ==========================================
 *.log
-*.sqlite
-*.zip
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*.old
+*.orig
+
+# ==========================================
+# CACHE
+# ==========================================
+.cache/
+.parcel-cache/
+.vite/
+.eslintcache/
+
+# ==========================================
+# IDE & EDITOR
+# ==========================================
 .vscode/
 .idea/
+*.code-workspace
+
+# ==========================================
+# OPERATING SYSTEM
+# ==========================================
 .DS_Store
 Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ==========================================
+# GIT & LOCAL ARCHIVES
+# ==========================================
+.git/
+*.zip
+Program Folder 2/
+Update Docs/

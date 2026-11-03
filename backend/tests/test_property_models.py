@@ -7,7 +7,7 @@ from backend.app.models.property_models import (
     PropertyBatch, PropertyCategory, AssertionLanguage, SignalReference,
     ClockContext, ResetContext, PropertyProvenance
 )
-from backend.app.models.design_ir import DesignIR, ModuleIR, PortIR, NetIR
+from backend.app.models.design_ir import DesignIR, ModuleIR, PortIR, NetIR, RegisterIR
 from backend.app.services.property_validation import validate_property_batch
 
 class PropertyModelTests(unittest.TestCase):
@@ -63,7 +63,11 @@ class PropertyModelTests(unittest.TestCase):
                 PortIR(name="rst_n", direction="input", bit_width=1, bits=[3]),
                 PortIR(name="enable", direction="input", bit_width=1, bits=[4]),
                 PortIR(name="count", direction="output", bit_width=8, bits=list(range(5,13))),
-            ])]
+            ],
+                registers=[RegisterIR(cell_name="count_reg", cell_type="$adffe", clock_bits=[2], reset_bits=[3], parameters={"CLK_POLARITY":"1", "ARST_POLARITY":"0"})],
+                clock_candidates=[{"name":"clk","signal":"clk","bits":[2]}],
+                reset_candidates=[{"name":"rst_n","signal":"rst_n","bits":[3],"kind":"asynchronous"}],
+            )]
         )
         batch = PropertyBatch(batch_id="batch1", design_top="counter", properties=[self.make_property()])
         result = validate_property_batch(design, batch)

@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.main import app
 from backend.app.models.design_ir import (
-    DesignIR, ModuleIR, PortIR, NetIR, ModuleSummaryIR
+    DesignIR, ModuleIR, PortIR, NetIR, ModuleSummaryIR, RegisterIR
 )
 from backend.app.models.property_models import (
     PropertyBatch, CandidateProperty, PropertyCategory,
@@ -35,8 +35,13 @@ class TestFormalVerification(unittest.TestCase):
                         PortIR(name="enable", direction="input", bit_width=1, bits=[3]),
                         PortIR(name="count", direction="output", bit_width=8, bits=list(range(4, 12))),
                     ],
-                    clock_candidates=[{"name": "clk", "polarity": "posedge"}],
-                    reset_candidates=[{"name": "rst_n", "polarity": "active_low"}],
+                    registers=[RegisterIR(
+                        cell_name="count_reg", cell_type="$sdffe",
+                        clock_bits=[1], reset_bits=[2],
+                        parameters={"CLK_POLARITY": "1", "SRST_POLARITY": "0"}
+                    )],
+                    clock_candidates=[{"name": "clk", "signal": "clk", "bits": [1]}],
+                    reset_candidates=[{"name": "rst_n", "signal": "rst_n", "bits": [2], "kind": "synchronous"}],
                     summary=ModuleSummaryIR(port_count=4)
                 )
             ]
@@ -83,24 +88,54 @@ class TestFormalVerification(unittest.TestCase):
             ]
         )
 
-    def test_checker_synthesizer_implication_and_vacuity(self):
-        synth = CheckerSynthesizer(check_vacuity=True)
-        res = synth.synthesize(self.counter_design, self.counter_batch)
+    def test_checker_synthesizer_compiles_overlapped_sva_implication(self):
+        prop = self.counter_batch.properties[0].model_copy(update={
+            "assertion_language": AssertionLanguage.SVA,
+            "expression": "disable iff (!rst_n) enable |-> count == count",
+            "signals": [SignalReference(name="enable", expected_width=1), SignalReference(name="count", expected_width=8), SignalReference(name="rst_n", expected_width=1)],
+            "reset": ResetContext(signal="rst_n", polarity="active_low", asynchronous=False),
+        })
+        one = PropertyBatch(batch_id="one", design_top="counter", properties=[prop])
+        result = CheckerSynthesizer().synthesize(self.counter_design, one)
+        self.assertIn("always @(posedge clk)", result.wrapper_source_code)
+        self.assertIn("if (!(!rst_n))", result.wrapper_source_code.replace("  ", " "))
+        self.assertIn("if (1'b1 && (enable))", result.wrapper_source_code)
+        self.assertIn("assert (count == count)", result.wrapper_source_code)
 
-        self.assertEqual(res.wrapper_module_name, "formal_counter")
-        self.assertTrue(res.has_clock)
-        self.assertEqual(res.clock_signal, "clk")
-        self.assertEqual(res.reset_signal, "rst_n")
-        self.assertEqual(len(res.properties), 2)
+    def test_checker_synthesizer_compiles_nonoverlapped_sva_implication(self):
+        prop = self.counter_batch.properties[0].model_copy(update={
+            "assertion_language": AssertionLanguage.SVA,
+            "expression": "disable iff (!rst_n) enable |=> count == $past(count) + 8'd1",
+            "signals": [SignalReference(name="enable", expected_width=1), SignalReference(name="count", expected_width=8), SignalReference(name="rst_n", expected_width=1)],
+            "reset": ResetContext(signal="rst_n", polarity="active_low", asynchronous=False),
+        })
+        one = PropertyBatch(batch_id="one", design_top="counter", properties=[prop])
+        result = CheckerSynthesizer().synthesize(self.counter_design, one)
+        self.assertIn("$past(enable)", result.wrapper_source_code)
+        self.assertIn("$past(!rst_n)", result.wrapper_source_code)
+        self.assertIn("$past(count)", result.wrapper_source_code)
 
-        code = res.wrapper_source_code
-        self.assertIn("module formal_counter", code)
-        self.assertIn("counter dut (", code)
-        self.assertIn("`ifdef FORMAL", code)
-        self.assertIn("reg f_past_valid = 1'b0;", code)
-        self.assertIn("cover(", code)
-        self.assertIn("assert(", code)
-        self.assertIn("if (!rst_n)", code)
+    def test_checker_synthesizer_rejects_unspecified_reset_timing(self):
+        prop = self.counter_batch.properties[0].model_copy(update={
+            "assertion_language": AssertionLanguage.SVA,
+            "expression": "disable iff (!rst_n) enable |=> count == $past(count) + 8'd1",
+            "signals": [SignalReference(name="enable", expected_width=1), SignalReference(name="count", expected_width=8), SignalReference(name="rst_n", expected_width=1)],
+            "reset": ResetContext(signal="rst_n", polarity="active_low", asynchronous=None),
+        })
+        one = PropertyBatch(batch_id="one", design_top="counter", properties=[prop])
+        with self.assertRaisesRegex(ValueError, "Asynchronous or unspecified"):
+            CheckerSynthesizer().synthesize(self.counter_design, one)
+
+    def test_checker_synthesizer_rejects_async_disable_iff(self):
+        prop = self.counter_batch.properties[0].model_copy(update={
+            "assertion_language": AssertionLanguage.SVA,
+            "expression": "disable iff (!rst_n) enable |=> count == $past(count) + 8'd1",
+            "signals": [SignalReference(name="enable", expected_width=1), SignalReference(name="count", expected_width=8), SignalReference(name="rst_n", expected_width=1)],
+            "reset": ResetContext(signal="rst_n", polarity="active_low", asynchronous=True),
+        })
+        one = PropertyBatch(batch_id="one", design_top="counter", properties=[prop])
+        with self.assertRaisesRegex(ValueError, "Reset timing mismatch"):
+            CheckerSynthesizer().synthesize(self.counter_design, one)
 
     def test_checker_synthesizer_combinational(self):
         alu_design = DesignIR(
@@ -131,7 +166,7 @@ class TestFormalVerification(unittest.TestCase):
                     description="Addition operation",
                     category=PropertyCategory.COMBINATIONAL,
                     assertion_language=AssertionLanguage.BOOLEAN,
-                    expression="op == 3'b000 |-> out == a + b",
+                    expression="(op == 3'b000) && (out == a + b)",
                     signals=[
                         SignalReference(name="a", expected_width=8),
                         SignalReference(name="b", expected_width=8),
@@ -145,7 +180,7 @@ class TestFormalVerification(unittest.TestCase):
         res = synth.synthesize(alu_design, alu_batch)
         self.assertFalse(res.has_clock)
         self.assertIn("always @(*)", res.wrapper_source_code)
-        self.assertIn("assert(out == a + b)", res.wrapper_source_code)
+        self.assertIn("assert ((op == 3'b000) && (out == a + b))", res.wrapper_source_code)
 
     def test_checker_synthesizer_assumptions(self):
         batch = PropertyBatch(
@@ -175,7 +210,8 @@ class TestFormalVerification(unittest.TestCase):
         )
         synth = CheckerSynthesizer()
         res = synth.synthesize(self.counter_design, batch)
-        self.assertIn("assume(enable == 1'b1);", res.wrapper_source_code)
+        self.assertNotIn("assume(enable == 1'b1);", res.wrapper_source_code)
+        self.assertTrue(any("not accepted" in warning for warning in res.warnings))
 
     def test_sby_config_generation(self):
         runner = SBYRunner()
@@ -231,20 +267,30 @@ class TestFormalVerification(unittest.TestCase):
             sby_runner=SBYRunner(mock_mode=True),
             check_vacuity=True
         )
+        safe_batch = PropertyBatch(
+            batch_id="batch_safe", design_top="counter", properties=[
+                CandidateProperty(
+                    property_id="P_COUNT_RANGE", design_top="counter", module="counter",
+                    name="count_range", description="Counter fits in 8 bits",
+                    category=PropertyCategory.INVARIANT, assertion_language=AssertionLanguage.BOOLEAN,
+                    expression="count <= 8'hff", signals=[SignalReference(name="count", expected_width=8)],
+                    clock=ClockContext(signal="clk")
+                )
+            ]
+        )
         req = FormalVerificationRequest(
             design_ir=self.counter_design,
             verilog_sources={"counter.sv": "// dummy counter RTL"},
-            property_batch=self.counter_batch,
-            proof_mode=ProofMode.PROVE,
-            depth=20,
-            solver=SolverEngine.Z3
+            property_batch=safe_batch,
+            proof_mode=ProofMode.PROVE, depth=20, solver=SolverEngine.Z3
         )
         res = service.verify(req)
-        self.assertEqual(res.overall_status, VerificationStatus.PASS)
-        self.assertEqual(len(res.results), 2)
-        self.assertEqual(res.results[0].status, VerificationStatus.PASS)
-        self.assertEqual(res.results[0].vacuity_status, VacuityStatus.NON_VACUOUS)
+        self.assertEqual(res.overall_status, VerificationStatus.UNKNOWN)
+        self.assertEqual(len(res.results), 1)
+        self.assertEqual(res.results[0].status, VerificationStatus.UNKNOWN)
+        self.assertEqual(res.results[0].vacuity_status, VacuityStatus.NOT_CHECKED)
         self.assertIn("formal_counter", res.synthesized_checker)
+        self.assertTrue(any("MOCK" in (r.log_snippet or "") for r in res.results))
 
     def test_verification_service_invalid_property_rejected(self):
         invalid_batch = PropertyBatch(
@@ -272,7 +318,7 @@ class TestFormalVerification(unittest.TestCase):
         )
         res = service.verify(req)
         self.assertEqual(res.results[0].status, VerificationStatus.INVALID)
-        self.assertIn("Design validation error", res.results[0].log_snippet)
+        self.assertIn("phantom_signal", res.results[0].log_snippet)
 
     def test_api_formal_verify_endpoint(self):
         client = TestClient(app)
@@ -334,8 +380,37 @@ class TestFormalVerification(unittest.TestCase):
         )
         synth = CheckerSynthesizer()
         res = synth.synthesize(alu_design, alu_batch)
-        self.assertEqual(res.wrapper_module_name, "formal_risc_alu")
-        self.assertIn("assert(zero == (out == 32'b0));", res.wrapper_source_code)
+        self.assertEqual(res.wrapper_module_name, "formal_risc_alu_PROP_ZERO_FLAG")
+        self.assertIn("assert (zero == (out == 32'b0));", res.wrapper_source_code)
+
+
+    def test_sby_log_parser_basecase_failure_is_not_induction_failure(self):
+        runner = SBYRunner()
+        stdout = "engine_0.basecase: BMC failed!\nengine_0.induction: terminating process\nDONE (FAIL, rc=2)"
+        status, phase, _, _ = runner.parse_sby_output(stdout, "", Path("/tmp"), ProofMode.PROVE)
+        self.assertEqual(status, VerificationStatus.FAIL)
+        self.assertEqual(phase, "base")
+
+    def test_vcd_parser_reads_counterexample_values(self):
+        from backend.app.services.formal.sby_runner import parse_vcd_trace
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            vcd = Path(tmp) / "trace.vcd"
+            vcd.write_text("""$scope module top $end
+$var wire 8 ! a $end
+$var wire 8 " b $end
+$upscope $end
+$enddefinitions $end
+#0
+b00000101 !
+b00000011 \"
+#1
+b00000010 !
+""")
+            trace = parse_vcd_trace(vcd)
+            self.assertEqual(len(trace["signals"]), 2)
+            self.assertEqual(trace["frames"][0]["values"]["!"], "00000101")
+            self.assertEqual(trace["frames"][0]["values"]["\""], "00000011")
 
 
 if __name__ == "__main__":

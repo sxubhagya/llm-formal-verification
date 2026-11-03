@@ -4,6 +4,25 @@ from typing import Any
 from backend.app.models.design_ir import DesignIR, ModuleIR
 
 
+def _decode_bit_parameter(value: object) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value if value in (0, 1) else None
+    raw = str(value).strip().replace("_", "")
+    if raw in {"0", "1"}:
+        return int(raw)
+    import re
+    match = re.fullmatch(r"[0-9]+'[sS]?[bB]([01]+)", raw)
+    if match:
+        number = int(match.group(1), 2)
+        return number if number in (0, 1) else None
+    if re.fullmatch(r"[01]+", raw):
+        number = int(raw, 2)
+        return number if number in (0, 1) else None
+    return None
+
+
 class DesignContext:
     """Encapsulates prepared context for a target module."""
 
@@ -48,9 +67,31 @@ class DesignContext:
         # Ports
         port_lines = []
         for p in self.ports:
-            width_str = f"[{p['bit_width']-1}:0]" if p['bit_width'] > 1 else "[0:0]"
-            port_lines.append(f"  - `{p['name']}`: {p['direction']} {width_str} ({p['bit_width']} bits)")
+            if p['bit_width'] > 1 or p.get("offset", 0) != 0 or p.get("upto", False):
+                left = p["offset"] if p.get("upto", False) else p["offset"] + p["bit_width"] - 1
+                right = p["offset"] + p["bit_width"] - 1 if p.get("upto", False) else p["offset"]
+                width_str = f"[{left}:{right}]"
+            else:
+                width_str = "[0:0]"
+            signed = " signed" if p.get("is_signed") else " unsigned"
+            port_lines.append(f"  - `{p['name']}`: {p['direction']} {width_str} ({p['bit_width']} bits, {signed.strip()})")
         sections.append("## Ports\n" + ("\n".join(port_lines) if port_lines else "  None"))
+        # Named internal nets from the elaborated target module are candidate
+        # observation points. They are not inferred from raw RTL text.
+        net_lines = []
+        port_names = {p["name"] for p in self.ports}
+        for name, width in sorted(self.signal_map.items()):
+            if name in port_names:
+                continue
+            net_lines.append(f"  - `{name}`: internal net ({width} bit(s)); hierarchical probe required")
+        sections.append(
+            "## Signal Observation Boundary\n"
+            "Top-level ports bind directly. Named internal nets listed below may be referenced; "
+            "the formal wrapper binds them explicitly through the instantiated DUT hierarchy. "
+            "Never invent names, widths, or signals. If a required internal net is absent from this list, omit the property. "
+            "Memory arrays themselves are not directly observable in this build; reason from exposed memory interface/state signals.\n"
+            + ("## Named Internal Nets\n" + "\\n".join(net_lines) if net_lines else "## Named Internal Nets\\n  None")
+        )
 
         # Clock Context
         if self.clock_context:
@@ -61,7 +102,10 @@ class DesignContext:
                 f"  - Source Cells: {', '.join(self.clock_context.get('source_cells', []))}"
             )
         else:
-            sections.append("## Clock Context\n  No clocked elements structurally identified (combinational design).")
+            if self.summary.get("sequential_cell_count", 0) == 0 and self.summary.get("memory_cell_count", 0) == 0:
+                sections.append("## Clock Context\n  No clocked elements structurally identified (combinational design).")
+            else:
+                sections.append("## Clock Context\n  Clocked state was identified, but no unambiguous clock edge was established. Do not assume posedge; omit temporal candidates or request explicit designer confirmation.")
 
         # Reset Context
         if self.reset_context:
@@ -143,51 +187,66 @@ def build_design_context(
             bit_to_port[str(bit)] = p.name
 
     # Inferred clock context
+    context_warnings = list(design.warnings)
     clock_ctx: dict[str, Any] | None = None
     if module.clock_candidates:
         cand = module.clock_candidates[0]
         clk_bits = [str(b) for b in cand.get("bits", [])]
         clk_port = next((bit_to_port[b] for b in clk_bits if b in bit_to_port), None)
         if clk_port:
-            edge = "posedge"
-            # check register cell parameters for CLK_POLARITY if available
-            for r in module.registers:
-                params = r.parameters or {}
-                if "CLK_POLARITY" in params and str(params["CLK_POLARITY"]) in {"0", "0'b0"}:
-                    edge = "negedge"
-                    break
-            clock_ctx = {
-                "signal": clk_port,
-                "edge": edge,
-                "source_cells": cand.get("source_cells", [])
+            polarities = {
+                _decode_bit_parameter((r.parameters or {}).get("CLK_POLARITY"))
+                for r in module.registers
+                if [str(bit) for bit in r.clock_bits] == clk_bits
             }
+            polarities.update({
+                _decode_bit_parameter((access.parameters or {}).get("CLK_POLARITY"))
+                for access in module.memory_accesses
+                if access.clocked and [str(bit) for bit in access.clock_bits] == clk_bits
+            })
+            if len(polarities) == 1 and None not in polarities:
+                edge = "posedge" if next(iter(polarities)) == 1 else "negedge"
+                clock_ctx = {
+                    "signal": clk_port,
+                    "edge": edge,
+                    "source_cells": cand.get("source_cells", [])
+                }
+            else:
+                context_warnings.append(
+                    f"Clock candidate '{clk_port}' was found, but its active edge could not be established unambiguously from sequential-cell metadata. Explicit clock-edge review is required."
+                )
 
-    # Inferred reset context
+    # Inferred reset context. Signal names such as rst_n are not reliable
+    # evidence of polarity; use the elaborated sequential-cell polarity.
     reset_ctx: dict[str, Any] | None = None
     if module.reset_candidates:
         rcand = module.reset_candidates[0]
         rst_bits = [str(b) for b in rcand.get("bits", [])]
         rst_port = next((bit_to_port[b] for b in rst_bits if b in bit_to_port), None)
         if rst_port:
-            polarity = "active_high"
-            if "rst_n" in rst_port.lower() or "resetn" in rst_port.lower() or "reset_n" in rst_port.lower():
-                polarity = "active_low"
-            # check register parameters
-            for r in module.registers:
-                params = r.parameters or {}
-                if "ARST_POLARITY" in params and str(params["ARST_POLARITY"]) in {"0", "0'b0"}:
-                    polarity = "active_low"
-                    break
-            reset_ctx = {
-                "signal": rst_port,
-                "polarity": polarity,
-                "asynchronous": (rcand.get("kind") == "asynchronous"),
-                "kind": rcand.get("kind", "unknown"),
-                "source_cells": rcand.get("source_cells", [])
+            reset_kind = rcand.get("kind", "unknown")
+            polarity_parameter = "ARST_POLARITY" if reset_kind == "asynchronous" else "SRST_POLARITY" if reset_kind == "synchronous" else None
+            polarities = {
+                _decode_bit_parameter((r.parameters or {}).get(polarity_parameter))
+                for r in module.registers
+                if polarity_parameter and [str(bit) for bit in r.reset_bits] == rst_bits
             }
+            if len(polarities) == 1 and None not in polarities:
+                polarity = "active_high" if next(iter(polarities)) == 1 else "active_low"
+                reset_ctx = {
+                    "signal": rst_port,
+                    "polarity": polarity,
+                    "asynchronous": (reset_kind == "asynchronous"),
+                    "kind": reset_kind,
+                    "source_cells": rcand.get("source_cells", [])
+                }
+            else:
+                context_warnings.append(
+                    f"Reset candidate '{rst_port}' was found, but its active polarity could not be established unambiguously from sequential-cell metadata. Do not infer polarity from the signal name."
+                )
 
     ports_data = [
-        {"name": p.name, "direction": p.direction, "bit_width": p.bit_width}
+        {"name": p.name, "direction": p.direction, "bit_width": p.bit_width, "is_signed": p.is_signed, "offset": p.offset, "upto": p.upto}
         for p in module.ports
     ]
 
@@ -219,7 +278,7 @@ def build_design_context(
         fsm_candidates=fsm_data,
         summary=summary_data,
         signal_map=signal_map,
-        warnings=design.warnings,
+        warnings=context_warnings,
         limitations=design.limitations,
         source_code=source_code,
         focus_areas=focus_areas

@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 from tempfile import TemporaryDirectory
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
 from backend.app.services.hdl.parser import HDLAnalysisService
 from backend.app.services.hdl.yosys_runner import YosysExecutionError
 
@@ -24,7 +25,7 @@ async def analyze_design(top_module: str = Form(...), files: list[UploadFile] = 
             safe_name = f"source_{index}{suffix}"
             path = Path(temp_dir) / safe_name; path.write_bytes(data); paths.append(path)
         try:
-            ir, log = HDLAnalysisService().analyze(paths, top_module.strip())
+            ir, log = await run_in_threadpool(HDLAnalysisService().analyze, paths, top_module.strip())
         except YosysExecutionError as exc:
             detail = {"message": str(exc), "returncode": exc.returncode, "diagnostics": exc.output[-8000:]}
             status_code = 503 if "was not found" in str(exc) or "Could not translate" in str(exc) else 422

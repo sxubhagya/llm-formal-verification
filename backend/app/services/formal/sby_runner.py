@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import re
+import secrets
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -41,6 +42,73 @@ class SBYRunResult:
     properties_failed: list[str] = field(default_factory=list)
     covers_reached: list[str] = field(default_factory=list)
     execution_time_seconds: float = 0.0
+    simulated: bool = False
+
+
+def parse_vcd_trace(path: str | Path, *, max_frames: int = 200, max_signals: int = 200) -> dict:
+    """Parse a compact, bounded VCD view for UI diagnostics (not a simulator)."""
+    vcd = Path(path)
+    if not vcd.is_file():
+        return {"signals": [], "frames": [], "truncated": False, "error": "VCD file not found"}
+    scopes: list[str] = []
+    signals: list[dict] = []
+    id_to_signal: dict[str, dict] = {}
+    frames: list[dict] = []
+    current_time = "0"
+    current_values: dict[str, str] = {}
+    in_header = True
+    truncated = False
+    try:
+        # Avoid loading arbitrarily large traces into API memory.
+        max_bytes = 20 * 1024 * 1024
+        raw_bytes = vcd.read_bytes()
+        if len(raw_bytes) > max_bytes:
+            raw_bytes = raw_bytes[:max_bytes]
+            truncated = True
+        for raw in raw_bytes.decode("utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if in_header:
+                if line.startswith("$scope"):
+                    parts = line.split()
+                    if len(parts) >= 3: scopes.append(parts[2])
+                elif line.startswith("$upscope"):
+                    if scopes: scopes.pop()
+                elif line.startswith("$var"):
+                    parts = line.split()
+                    if len(parts) >= 6:
+                        if len(signals) >= max_signals:
+                            truncated = True
+                        else:
+                            width, ident, reference = int(parts[2]), parts[3], parts[4]
+                            item = {"id": ident, "name": ".".join(scopes + [reference]), "width": width}
+                            signals.append(item); id_to_signal[ident] = item
+                elif line.startswith("$enddefinitions"):
+                    in_header = False
+                continue
+            if line.startswith("#"):
+                if current_values:
+                    frames.append({"time": current_time, "values": dict(current_values)})
+                current_time = line[1:]
+                if len(frames) >= max_frames:
+                    truncated = True
+                    break
+            elif line[0] in "bB":
+                parts = line[1:].split()
+                if len(parts) == 2 and parts[1] in id_to_signal:
+                    current_values[parts[1]] = parts[0].lower()
+            elif line[0] in "01xXzZ" and len(line) > 1:
+                ident = line[1:].strip()
+                if ident in id_to_signal: current_values[ident] = line[0].lower()
+        if current_values and len(frames) < max_frames:
+            frames.append({"time": current_time, "values": dict(current_values)})
+        # Include only signals that actually appear in the trace.
+        used = {key for frame in frames for key in frame["values"]}
+        signals = [sig for sig in signals if sig["id"] in used]
+        return {"signals": signals, "frames": frames[:max_frames], "truncated": truncated or len(frames) > max_frames}
+    except (OSError, ValueError) as exc:
+        return {"signals": [], "frames": [], "truncated": False, "error": str(exc)}
 
 
 class SBYRunner:
@@ -57,6 +125,7 @@ class SBYRunner:
         self.distro = distro or os.getenv("WSL_DISTRO", "Ubuntu")
         self.timeout_seconds = timeout_seconds
         self.mock_mode = mock_mode
+        self._availability_cache: dict[tuple[bool, str], bool] = {}
 
     def _use_wsl(self) -> bool:
         if self.mode == "wsl":
@@ -80,6 +149,33 @@ class SBYRunner:
             )
         return result.stdout.strip()
 
+    @staticmethod
+    def _validate_identifier(value: str, label: str) -> str:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", value or ""):
+            raise ValueError(f"Invalid {label}: {value!r}")
+        return value
+
+    @staticmethod
+    def _validate_source_name(value: str) -> str:
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts or not value or any(c in value for c in "\\\x00\r\n;`$%"):
+            raise ValueError(f"Unsafe source filename: {value!r}")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", value):
+            raise ValueError(f"Unsafe source filename: {value!r}")
+        return value
+
+    def _wsl_has_sby(self, solver_name: str) -> bool:
+        cache_key = (True, solver_name)
+        if cache_key in self._availability_cache:
+            return self._availability_cache[cache_key]
+        result = subprocess.run(
+            ["wsl.exe", "-d", self.distro, "--", "bash", "-lc", f"command -v sby && command -v yosys && command -v {solver_name}"],
+            capture_output=True, text=True, timeout=15
+        )
+        available = result.returncode == 0 and "sby" in result.stdout and "yosys" in result.stdout
+        self._availability_cache[cache_key] = available
+        return available
+
     def generate_sby_config(
         self,
         top_module: str,
@@ -89,6 +185,11 @@ class SBYRunner:
         solver: SolverEngine = SolverEngine.Z3
     ) -> str:
         """Generates the text for an .sby project configuration file."""
+        self._validate_identifier(top_module, "top module")
+        for src in source_filenames:
+            self._validate_source_name(src)
+        if not 1 <= depth <= 200:
+            raise ValueError("SBY depth must be between 1 and 200.")
         lines = [
             "[options]",
             f"mode {proof_mode.value}",
@@ -116,32 +217,39 @@ class SBYRunner:
         """Parses SBY stdout/stderr to determine proof status, failure phase, and trace paths."""
         combined = stdout + "\n" + stderr
 
-        # Check for SBY completion signatures
-        # SBY output formats:
-        # "SBY [task_name] summary: engine_0 (smtbmc z3) returned pass"
-        # "SBY [task_name] summary: engine_0 (smtbmc z3) returned fail"
-        # "DONE (PASS, ...)"
-        # "DONE (FAIL, ...)"
+        # Require an explicit SBY terminal marker. Incidental log words must not
+        # be interpreted as a proof result.
         status = VerificationStatus.UNKNOWN
         failure_phase = None
-
-        if "DONE (FAIL" in combined or "returned fail" in combined or "Status: failed" in combined or "failed!" in combined:
-            status = VerificationStatus.FAIL
-        elif "DONE (TIMEOUT" in combined or "timed out" in combined.lower():
-            status = VerificationStatus.TIMEOUT
-        elif "ERROR:" in combined or "syntax error" in combined.lower() or "not found" in combined.lower():
+        done = re.findall(r"DONE \((PASS|FAIL|TIMEOUT)(?:,|\))", combined)
+        if done:
+            terminal = done[-1]
+            status = {
+                "PASS": VerificationStatus.PASS,
+                "FAIL": VerificationStatus.FAIL,
+                "TIMEOUT": VerificationStatus.TIMEOUT,
+            }[terminal]
+        elif "syntax error" in combined.lower() or "unknown command" in combined.lower() or "could not find" in combined.lower():
             status = VerificationStatus.INVALID
-        elif "DONE (PASS" in combined or "returned pass" in combined or "Status: passed" in combined:
-            status = VerificationStatus.PASS
 
         # Analyze failure phase for k-induction or BMC
         if status == VerificationStatus.FAIL:
-            if "induction step failed" in combined or "engine_0.induction" in combined:
-                failure_phase = "step"
-            elif "basecase" in combined:
+            # Determine the phase from an explicit failure event. Merely seeing
+            # an induction process in the log is not evidence that induction failed.
+            if re.search(r"basecase:.*(?:BMC failed|Status: failed)|BMC failed!|returned FAIL for basecase", combined, re.IGNORECASE):
+                # A reachable base-case counterexample is decisive even if the
+                # induction engine also reports a failed step.
                 failure_phase = "base"
+            elif re.search(r"induction(?: step)? failed|engine_\d+\.induction:.*(?:failed|Status: failed)", combined, re.IGNORECASE):
+                failure_phase = "step"
+            elif proof_mode == ProofMode.BMC:
+                failure_phase = "bmc"
             else:
-                failure_phase = proof_mode.value
+                failure_phase = "unknown"
+            if failure_phase == "unknown":
+                # In prove mode, an unclassified failure without basecase or induction
+                # diagnostics is treated as unknown.
+                status = VerificationStatus.UNKNOWN
 
         # Locate counterexample trace
         vcd_path = None
@@ -169,6 +277,10 @@ class SBYRunner:
         """Executes SBY in an isolated work directory."""
         import time
         start_time = time.time()
+        self._validate_identifier(task_name, "task name")
+        self._validate_identifier(top_module, "top module")
+        for source_name in sources:
+            self._validate_source_name(source_name)
 
         # Create isolated working directory
         cleanup_dir = False
@@ -179,7 +291,13 @@ class SBYRunner:
             work_dir.mkdir(parents=True, exist_ok=True)
 
         # Write all source files into working directory
+        total_source_bytes = 0
         for fname, content in sources.items():
+            if not isinstance(content, str) or "\x00" in content:
+                raise ValueError(f"Invalid source content for {fname!r}.")
+            total_source_bytes += len(content.encode("utf-8"))
+            if total_source_bytes > 5_000_000:
+                raise ValueError("Combined formal source bundle exceeds 5 MB limit.")
             fpath = work_dir / fname
             fpath.parent.mkdir(parents=True, exist_ok=True)
             fpath.write_text(content, encoding="utf-8")
@@ -196,62 +314,92 @@ class SBYRunner:
         task_file = work_dir / f"{task_name}.sby"
         task_file.write_text(sby_config, encoding="utf-8")
 
-        # Check mock mode or tool availability
+        # Mock mode is test-only and can never produce a mathematical PASS.
         use_wsl = self._use_wsl()
-        is_tool_available = use_wsl or (shutil.which("sby") is not None)
-
-        if self.mock_mode or not is_tool_available:
-            # Deterministic simulation of SBY for test environments without native SBY installed
+        if self.mock_mode:
             elapsed = time.time() - start_time
-            mock_stdout = (
-                f"SBY [mock] engine_0 (smtbmc {solver.value}) starting...\n"
-                f"## Checked {top_module} using {proof_mode.value} up to depth {depth}\n"
-                f"DONE (PASS, rc=0)\n"
-                f"summary: engine_0 (smtbmc {solver.value}) returned pass\n"
-                f"Status: passed\n"
-            )
             return SBYRunResult(
-                status=VerificationStatus.PASS,
+                status=VerificationStatus.UNKNOWN,
                 returncode=0,
-                stdout=mock_stdout,
+                stdout="MOCK EXECUTION ONLY: no solver was invoked; no proof result is available.",
                 stderr="",
                 work_dir=work_dir,
                 task_file_content=sby_config,
-                vcd_trace_path=None,
-                witness_trace_path=None,
-                failure_phase=None,
-                vacuity_status=VacuityStatus.NON_VACUOUS if proof_mode == ProofMode.PROVE else VacuityStatus.NOT_CHECKED,
-                execution_time_seconds=elapsed
+                vacuity_status=VacuityStatus.NOT_CHECKED,
+                execution_time_seconds=elapsed,
+                simulated=True,
+            )
+
+        cache_key = (False, solver.value)
+        if cache_key not in self._availability_cache:
+            self._availability_cache[cache_key] = bool(shutil.which("sby") and shutil.which("yosys") and shutil.which(solver.value))
+        solver_available = self._wsl_has_sby(solver.value) if use_wsl else self._availability_cache[cache_key]
+        is_tool_available = solver_available
+        if not is_tool_available:
+            elapsed = time.time() - start_time
+            return SBYRunResult(
+                status=VerificationStatus.INVALID,
+                returncode=127,
+                stdout="",
+                stderr="Formal tools unavailable: both sby and yosys must be installed in the selected execution environment.",
+                work_dir=work_dir,
+                task_file_content=sby_config,
+                vacuity_status=VacuityStatus.NOT_CHECKED,
+                execution_time_seconds=elapsed,
             )
 
         # Real execution via native SBY or WSL
         try:
             if use_wsl:
+                self._validate_identifier(task_name, "task name")
                 wsl_work = self._wsl_path(work_dir)
-                cmd = ["wsl.exe", "-d", self.distro, "--", "bash", "-c", f"cd {wsl_work} && sby -f {task_name}.sby"]
+                cmd = ["wsl.exe", "-d", self.distro, "--cd", wsl_work, "--", "sby", "-f", f"{task_name}.sby"]
             else:
                 cmd = ["sby", "-f", f"{task_name}.sby"]
 
-            proc = subprocess.run(
-                cmd,
-                cwd=str(work_dir),
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds
-            )
+            popen_kwargs = {
+                "cwd": str(work_dir),
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "text": True,
+            }
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            else:
+                popen_kwargs["start_new_session"] = True
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+            try:
+                stdout, stderr = proc.communicate(timeout=self.timeout_seconds)
+            except subprocess.TimeoutExpired:
+                # Kill the process tree/group, not just the Python parent. This
+                # prevents orphaned solver processes consuming resources.
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                        capture_output=True, text=True, timeout=10
+                    )
+                else:
+                    import signal
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                stdout, stderr = proc.communicate()
+                raise subprocess.TimeoutExpired(cmd, self.timeout_seconds, output=stdout, stderr=stderr)
             elapsed = time.time() - start_time
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
             retcode = proc.returncode
 
             status, failure_phase, vcd_path, witness_path = self.parse_sby_output(
                 stdout, stderr, work_dir, proof_mode
             )
+            if retcode != 0 and status == VerificationStatus.PASS:
+                status = VerificationStatus.UNKNOWN
+            if retcode == 0 and status == VerificationStatus.UNKNOWN and "DONE (PASS" not in (stdout + stderr):
+                status = VerificationStatus.UNKNOWN
 
-            # Determine vacuity status: if proof passed and cover statement was verified
+            # Assertion proof and cover reachability are separate tasks. This runner
+            # does not claim non-vacuity until an independent cover task is implemented.
             vacuity = VacuityStatus.NOT_CHECKED
-            if status == VerificationStatus.PASS:
-                vacuity = VacuityStatus.NON_VACUOUS
 
             return SBYRunResult(
                 status=status,
@@ -269,11 +417,17 @@ class SBYRunner:
 
         except subprocess.TimeoutExpired as exc:
             elapsed = time.time() - start_time
+            partial_stdout = exc.stdout or ""
+            partial_stderr = exc.stderr or ""
+            if isinstance(partial_stdout, bytes):
+                partial_stdout = partial_stdout.decode("utf-8", errors="replace")
+            if isinstance(partial_stderr, bytes):
+                partial_stderr = partial_stderr.decode("utf-8", errors="replace")
             return SBYRunResult(
                 status=VerificationStatus.TIMEOUT,
                 returncode=124,
-                stdout=exc.stdout or "",
-                stderr="SBY execution exceeded timeout limit",
+                stdout=partial_stdout,
+                stderr=(partial_stderr + "\nSBY execution exceeded the configured per-property timeout limit.").strip(),
                 work_dir=work_dir,
                 task_file_content=sby_config,
                 failure_phase="timeout",

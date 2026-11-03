@@ -4,15 +4,16 @@ import json
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
+from backend.app.models.specification_models import DesignSpecification, BehaviouralRequirement
 from backend.app.models.design_ir import (
     DesignIR, ModuleIR, PortIR, NetIR, ModuleSummaryIR,
-    FSMCandidateIR, MemoryAccessIR
+    FSMCandidateIR, MemoryAccessIR, RegisterIR
 )
 from backend.app.services.llm.provider import get_llm_provider
 from backend.app.services.llm.mock_provider import MockProvider
 from backend.app.services.llm.context_builder import build_design_context
 from backend.app.services.llm.prompt_builder import build_generation_prompts
-from backend.app.services.llm.property_generator import PropertyGenerationService
+from backend.app.services.llm.property_generator import PropertyGenerationService, _canonicalize_clock_reset_fields
 
 
 class LLMPipelineTests(unittest.TestCase):
@@ -35,12 +36,20 @@ class LLMPipelineTests(unittest.TestCase):
                         NetIR(name="enable", bit_width=1, bits=[3]),
                         NetIR(name="count", bit_width=8, bits=list(range(4, 12))),
                     ],
-                    clock_candidates=[{"bits": [1], "source_cells": ["$adffe_0"], "source_kind": "sequential"}],
+                    registers=[RegisterIR(
+                        cell_name="$adffe_0", cell_type="$adffe",
+                        clock_bits=[1], reset_bits=[2],
+                        parameters={"CLK_POLARITY": "00000000000000000000000000000001", "ARST_POLARITY": "00000000000000000000000000000000"}
+                    )],
+                    clock_candidates=[{"name": "clk", "signal": "clk", "bits": [1], "source_cells": ["$adffe_0"], "source_kind": "sequential"}],
                     reset_candidates=[{"bits": [2], "kind": "asynchronous", "source_cells": ["$adffe_0"]}],
                     summary=ModuleSummaryIR(port_count=4, input_port_count=3, output_port_count=1)
                 )
             ]
         )
+
+        self.counter_spec = DesignSpecification(specification_id="counter-spec", title="Counter behaviour", design_top="counter", requirements=[BehaviouralRequirement(requirement_id="REQ-01", statement="The count output is an unsigned 8-bit value and never exceeds 255.")]).approve("test-reviewer")
+        self.alu_spec = DesignSpecification(specification_id="alu-spec", title="ALU behaviour", design_top="comb_alu", requirements=[BehaviouralRequirement(requirement_id="REQ-01", statement="For op 00 result is a plus b, for 01 it is a minus b, for 10 it is bitwise AND, and for 11 it is bitwise XOR.")]).approve("test-reviewer")
 
         self.alu_design = DesignIR(
             top_module="comb_alu",
@@ -73,7 +82,7 @@ class LLMPipelineTests(unittest.TestCase):
 
         prompt_text = ctx.to_prompt_text()
         self.assertIn("Top Module: `counter`", prompt_text)
-        self.assertIn("`count`: output [7:0] (8 bits)", prompt_text)
+        self.assertIn("`count`: output [7:0] (8 bits, unsigned)", prompt_text)
         self.assertIn("Inferred Clock Context", prompt_text)
 
     def test_context_builder_combinational_design(self):
@@ -89,16 +98,37 @@ class LLMPipelineTests(unittest.TestCase):
 
     def test_prompt_builder_enforces_principles(self):
         ctx = build_design_context(self.counter_design)
-        sys_prompt, user_prompt = build_generation_prompts(ctx, max_properties=3)
+        sys_prompt, user_prompt = build_generation_prompts(ctx, max_properties=3, specification_text="REQ-01: count stays within 8-bit range")
         self.assertIn("UNTRUSTED candidate proposer", sys_prompt)
         self.assertIn("NEVER claim a property has been proven", sys_prompt)
         self.assertIn("NEVER invent or hallucinate signal names", sys_prompt)
         self.assertIn("proposed", user_prompt)
+        self.assertIn("INDEPENDENT BEHAVIOURAL SPECIFICATION", user_prompt)
+        self.assertIn("sole authority", sys_prompt)
+        self.assertIn("systemverilog_assertion", sys_prompt)
+        self.assertIn("|=>", sys_prompt)
+        self.assertIn('"signal": "clk"', user_prompt)
+        self.assertIn('"signal": "rst_n"', user_prompt)
+
+
+    def test_clock_reset_name_alias_is_normalized_to_signal(self):
+        payload = {"properties": [{"property_id": "p1", "clock": {"name": "clk", "edge": "posedge"}, "reset": {"name": "rst_n", "polarity": "active_low", "asynchronous": False}}]}
+        warnings = _canonicalize_clock_reset_fields(payload)
+        self.assertEqual(payload["properties"][0]["clock"]["signal"], "clk")
+        self.assertEqual(payload["properties"][0]["reset"]["signal"], "rst_n")
+        self.assertNotIn("name", payload["properties"][0]["clock"])
+        self.assertNotIn("name", payload["properties"][0]["reset"])
+        self.assertEqual(len(warnings), 2)
+
+    def test_clock_reset_conflicting_aliases_are_rejected(self):
+        payload = {"properties": [{"property_id": "p1", "clock": {"name": "clk_a", "signal": "clk_b"}}]}
+        with self.assertRaisesRegex(ValueError, "conflicting clock.name and clock.signal"):
+            _canonicalize_clock_reset_fields(payload)
 
     def test_mock_provider_generation_end_to_end(self):
         provider = MockProvider(model_name="test-mock")
         service = PropertyGenerationService(provider=provider)
-        response = service.generate_candidate_properties(design=self.counter_design, max_properties=2)
+        response = service.generate_candidate_properties(design=self.counter_design, max_properties=2, specification=self.counter_spec)
 
         self.assertEqual(response.batch.design_top, "counter")
         self.assertEqual(len(response.batch.properties), 2)
@@ -114,6 +144,35 @@ class LLMPipelineTests(unittest.TestCase):
             for asm in prop.assumptions:
                 self.assertEqual(asm.status.value, "proposed")
 
+    def test_mock_provider_generation_matches_comb_alu_design(self):
+        provider = MockProvider(model_name="test-mock-alu")
+        service = PropertyGenerationService(provider=provider)
+        response = service.generate_candidate_properties(design=self.alu_design, max_properties=5, specification=self.alu_spec)
+
+        self.assertEqual(response.batch.design_top, "comb_alu")
+        self.assertEqual(len(response.batch.properties), 1)
+        prop = response.batch.properties[0]
+        self.assertEqual(prop.module, "comb_alu")
+        self.assertEqual(prop.property_id, "comb_alu_matches_operation_table")
+        self.assertIn("result ==", prop.expression)
+        self.assertEqual(response.validation.summary["design_valid"], 1)
+        self.assertEqual(response.validation.summary["rejected"], 0)
+
+    def test_api_generate_endpoint_success_for_comb_alu_mock(self):
+        client = TestClient(app)
+        payload = {
+            "design": self.alu_design.model_dump(),
+            "target_module": "comb_alu",
+            "max_properties": 5,
+            "provider": "mock",
+            "specification": self.alu_spec.model_dump(mode="json")
+        }
+        res = client.post("/api/properties/generate", json=payload)
+        self.assertEqual(res.status_code, 200, res.text)
+        data = res.json()
+        self.assertEqual(data["batch"]["design_top"], "comb_alu")
+        self.assertEqual(data["validation"]["summary"]["design_valid"], 1)
+
     def test_generation_strips_markdown_code_fences(self):
         provider = MockProvider(model_name="fenced-mock")
         service = PropertyGenerationService(provider=provider)
@@ -126,13 +185,13 @@ class LLMPipelineTests(unittest.TestCase):
         raw_default = MockProvider().generate("").content
         fenced = f"Here is the result:\n```json\n{raw_default}\n```\nHope this helps!"
         service_fenced = PropertyGenerationService(provider=MockProvider(custom_content=fenced))
-        resp = service_fenced.generate_candidate_properties(design=self.counter_design)
+        resp = service_fenced.generate_candidate_properties(design=self.counter_design, specification=self.counter_spec)
         self.assertEqual(len(resp.batch.properties), 2)
 
     def test_generation_rejects_malformed_json(self):
         service = PropertyGenerationService(provider=MockProvider(custom_content="Not valid JSON at all"))
         with self.assertRaises(ValueError) as ctx:
-            service.generate_candidate_properties(design=self.counter_design)
+            service.generate_candidate_properties(design=self.counter_design, specification=self.counter_spec)
         self.assertIn("could not be parsed as valid JSON", str(ctx.exception))
 
     def test_api_generate_endpoint_success(self):
@@ -141,7 +200,8 @@ class LLMPipelineTests(unittest.TestCase):
             "design": self.counter_design.model_dump(),
             "target_module": "counter",
             "max_properties": 2,
-            "provider": "mock"
+            "provider": "mock",
+            "specification": self.counter_spec.model_dump(mode="json")
         }
         res = client.post("/api/properties/generate", json=payload)
         self.assertEqual(res.status_code, 200)
@@ -224,7 +284,7 @@ class LLMPipelineTests(unittest.TestCase):
         err_provider = MockProvider(raise_error=PermissionError("Invalid API Key"))
         service = PropertyGenerationService(provider=err_provider)
         with self.assertRaises(PermissionError):
-            service.generate_candidate_properties(self.counter_design)
+            service.generate_candidate_properties(self.counter_design, specification=self.counter_spec)
 
 
 if __name__ == "__main__":
